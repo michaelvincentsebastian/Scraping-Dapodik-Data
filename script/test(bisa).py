@@ -7,7 +7,7 @@ import csv
 import time
 import urllib3
 import os
-import sys # Tambahkan import sys untuk exit gracefully
+import sys
 
 # Menonaktifkan peringatan SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -18,8 +18,14 @@ SEMESTER_ID = '20251' # Ganti sesuai semester yang diinginkan
 LEVEL_WILAYAH = '0'
 KODE_WILAYAH = '000000'
 
+# Membuat sesi Request Global untuk koneksi yang lebih efisien
+# ⚠️ PERUBAHAN 1: INISIASI GLOBAL SESSION
+session = requests.Session()
+
+
 def request_api(base_url: str = BASE_URL, level_wilayah: str = LEVEL_WILAYAH, kode_wilayah: str = KODE_WILAYAH, semester_id: str = SEMESTER_ID, sekolah_id: str = None) -> list:
     """Mengambil data wilayah atau rekapitulasi sekolah dari API Dapo."""
+    global session # Gunakan sesi yang telah dibuat
     try:
         if sekolah_id:
             # API untuk detail rekapitulasi sekolah
@@ -31,7 +37,7 @@ def request_api(base_url: str = BASE_URL, level_wilayah: str = LEVEL_WILAYAH, ko
             # API untuk data sekolah/wilayah (provinsi/kota/kecamatan) - Mengikuti kode asli
             url = f'{base_url}/rekap/dataSekolah?id_level_wilayah={level_wilayah}&kode_wilayah={kode_wilayah}&semester_id={semester_id}'
 
-        req = requests.get(url)
+        req = session.get(url) # ⚠️ PERUBAHAN 2: MENGGUNAKAN SESSION
         # Handle jika API mengembalikan respons non-JSON (misalnya error 500 atau 404)
         if req.status_code != 200:
             print(f"API Error {req.status_code} for URL: {url}")
@@ -41,64 +47,37 @@ def request_api(base_url: str = BASE_URL, level_wilayah: str = LEVEL_WILAYAH, ko
         print(f"Error requesting API for {kode_wilayah}: {e}")
         return []
 
-# Fungsi-fungsi lain (request_html, create_csv_header, append_to_csv, parse_html, lat_lon_parse)
-# tidak diubah, karena tidak ada error di sana.
+
 def request_html(url: str, backoff: float = 2.0) -> str:
     """Mengambil konten HTML dengan mekanisme retry sederhana."""
+    global session # Gunakan sesi yang telah dibuat
     for attempt in range(3): # Coba 3 kali
         try:
             if not url.startswith('http'):
                 raise ValueError(f"Invalid URL: {url}")
-            res = requests.get(url, verify=False, timeout=10) # Tambahkan timeout
+            res = session.get(url, verify=False, timeout=10) # ⚠️ PERUBAHAN 3: MENGGUNAKAN SESSION
             if res.status_code == 404:
                 return "" # Return string kosong jika 404
             
             # Cek jika ada Human Validation (Captcha/Cloudflare)
             if "User validation required" in res.text or "Checking your browser" in res.text:
-                print(f"        [WARNING] Validasi Pengguna Ditemukan. Retrying in {backoff}s...")
+                print(f"         [WARNING] Validasi Pengguna Ditemukan. Retrying in {backoff}s...")
                 time.sleep(backoff)
                 backoff *= 2 # Naikkan backoff time
                 continue
             return res.text
         except requests.RequestException as e:
-            print(f"        [NETWORK ERROR] {e}, retrying in {backoff}s...")
+            print(f"         [NETWORK ERROR] {e}, retrying in {backoff}s...")
             time.sleep(backoff)
             backoff *= 2
     return "" # Return string kosong jika semua percobaan gagal
 
-def create_csv_header(filename):
-    """Membuat file CSV baru dengan header."""
-    headers = [
-        'Nama_Sekolah', 'Provinsi', 'Kota', 'Kecamatan',
-        'NPSN', 'Status', 'Bentuk_Pendidikan', 'Status_Kepemilikan',
-        'SK_Pendirian_Sekolah', 'Tanggal_SK_Pendirian', 'SK_Izin_Operasional',
-        'Tanggal_SK_Izin_Operasional', 'Kebutuhan_Khusus_Dilayani', 'Nama_Bank',
-        'Cabang_KCP_Unit', 'Rekening_Atas_Nama', 'Status_BOS',
-        'Waku_Penyelenggaraan', 'Sertifikasi_ISO', 'Sumber_Listrik',
-        'Daya_Listrik', 'Kecepatan_Internet', 'Kepsek', 'Operator',
-        'Akreditasi', 'Kurikulum', 'Waktu', 'Alamat', 'RT_RW',
-        'Dusun', 'Desa_Kelurahan', 'Kecamatan_Detail', 'Kabupaten',
-        'Provinsi_Detail', 'Kode_Pos', 'Lintang', 'Bujur', 'Guru_L', 'Guru_P', 'Guru_Total',
-        'Tendik_L', 'Tendik_P', 'Tendik_Total', 'PTK_L', 'PTK_P', 'PTK_Total', 'PD_L', 'PD_P', 'PD_Total',
-        'Before_Ruang_Kelas', 'After_Ruang_Kelas', 'Before_Ruang_Perpus', 'After_Ruang_Perpus',
-        'Before_Ruang_Lab', 'After_Ruang_Lab', 'Before_Ruang_Pratik', 'After_Ruang_Pratik',
-        'Before_Ruang_Pimpinan', 'After_Ruang_Pimpinan', 'Before_Ruang_Guru', 'After_Ruang_Guru',
-        'Before_Ruang_Ibadah', 'After_Ruang_Ibadah', 'Before_Ruang_UKS', 'After_Ruang_UKS',
-        'Before_Toilet', 'After_Toilet', 'Before_Gudang', 'After_Gudang',
-        'Before_Ruang_Sirkulasi', 'After_Ruang_Sirkulasi', 'Before_Tempat_Bermain_Olahraga', 'After_Tempat_Bermain_Olahraga',
-        'Before_Ruang_TU', 'After_Ruang_TU', 'Before_Ruang_Konseling', 'After_Ruang_Konseling',
-        'Before_Ruang_OSIS', 'After_Ruang_OSIS', 'Before_Bangunan', 'After_Bangunan', 'Rombel'
-    ]
-
-    with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow(headers)
-
-def append_to_csv(filename, school_data, school_name, province, kota, kecamatan):
-    """Menambahkan data sekolah ke file CSV."""
+# ⚠️ PERUBAHAN 4: FUNGSI create_csv_header DIHAPUS karena Pandas akan membuat header di akhir.
+# ⚠️ PERUBAHAN 5: FUNGSI append_to_csv DIUBAH menjadi extract_data_to_dict yang mengembalikan Dictionary.
+def extract_data_to_dict(school_data, school_name, province, kota, kecamatan):
+    """Mengubah data sekolah hasil scrape menjadi satu dictionary (row)."""
     profile = school_data.get('profile', {})
     contact = school_data.get('contact', {})
-    # Pastikan mengambil dictionary pertama dari list rekapitulasi, yang sudah dilakukan di parse_html
     recapitulation = school_data.get('recapitulation', {})
 
     # Extract data with default empty values
@@ -112,13 +91,10 @@ def append_to_csv(filename, school_data, school_name, province, kota, kecamatan)
     Guru_P = recapitulation.get('ptk_perempuan', 0)
     Guru_Total = Guru_L + Guru_P
     
-    # Catatan: API Dapodik kadang membedakan PTK (Pendidik dan Tenaga Kependidikan) dan Pegawai (Tendik).
-    # Di sini, kita asumsikan Tendik adalah Pegawai.
     Tendik_L = recapitulation.get('pegawai_laki', 0)
     Tendik_P = recapitulation.get('pegawai_perempuan', 0)
     Tendik_Total = Tendik_L + Tendik_P
     
-    # PTK (Total Pendidik dan Tenaga Kependidikan)
     PTK_L = recapitulation.get('ptk_laki', 0) + recapitulation.get('pegawai_laki', 0)
     PTK_P = recapitulation.get('ptk_perempuan', 0) + recapitulation.get('pegawai_perempuan', 0)
     PTK_Total = PTK_L + PTK_P
@@ -127,90 +103,91 @@ def append_to_csv(filename, school_data, school_name, province, kota, kecamatan)
     PD_P = recapitulation.get('pd_perempuan', 0)
     PD_Total = PD_L + PD_P
 
-    # --- MEMBANGUN BARIS CSV ---
-    row = [
-        school_name,province, kota, kecamatan,
-        identitas.get('NPSN', ''),
-        identitas.get('Status', ''),
-        identitas.get('Bentuk Pendidikan', ''),
-        identitas.get('Status Kepemilikan', ''),
-        identitas.get('SK Pendirian Sekolah', ''),
-        identitas.get('Tanggal SK Pendirian', ''),
-        identitas.get('SK Izin Operasional', ''),
-        identitas.get('Tanggal SK Izin Operasional', ''),
-        pelengkap.get('Kebutuhan Khusus Dilayani', ''),
-        pelengkap.get('Nama Bank', ''),
-        pelengkap.get('Cabang KCP/Unit', ''),
-        pelengkap.get('Rekening Atas Nama', ''),
-        rinci.get('Status BOS', ''),
-        rinci.get('Waku Penyelenggaraan', ''),
-        rinci.get('Sertifikasi ISO', ''),
-        rinci.get('Sumber Listrik', ''),
-        rinci.get('Daya Listrik', ''),
-        rinci.get('Kecepatan Internet', ''),
-        sidebar.get('Kepsek', ''),
-        sidebar.get('Operator', ''),
-        sidebar.get('Akreditasi', ''),
-        sidebar.get('Kurikulum', ''),
-        sidebar.get('Waktu', ''),
-        contact.get('Alamat', ''),
-        contact.get('RT / RW', ''),
-        contact.get('Dusun', ''),
-        contact.get('Desa / Kelurahan', ''),
-        contact.get('Kecamatan', ''),
-        contact.get('Kabupaten', ''),
-        contact.get('Provinsi', ''),
-        contact.get('Kode Pos', ''),
-        contact.get('Lintang', ''),
-        contact.get('Bujur', ''),
-        Guru_L, Guru_P, Guru_Total,
-        Tendik_L, Tendik_P, Tendik_Total,
-        PTK_L, PTK_P, PTK_Total,
-        PD_L, PD_P, PD_Total,
-        recapitulation.get('before_ruang_kelas', 0),
-        recapitulation.get('after_ruang_kelas', 0),
-        recapitulation.get('before_ruang_perpus', 0),
-        recapitulation.get('after_ruang_perpus', 0),
-        recapitulation.get('before_ruang_lab', 0),
-        recapitulation.get('after_ruang_lab', 0),
-        recapitulation.get('before_ruang_praktik', 0),
-        recapitulation.get('after_ruang_praktik', 0),
-        recapitulation.get('before_ruang_pimpinan', 0),
-        recapitulation.get('after_ruang_pimpinan', 0),
-        recapitulation.get('before_ruang_guru', 0),
-        recapitulation.get('after_ruang_guru', 0),
-        recapitulation.get('before_ruang_ibadah', 0),
-        recapitulation.get('after_ruang_ibadah', 0),
-        recapitulation.get('before_ruang_uks', 0),
-        recapitulation.get('after_ruang_uks', 0),
-        recapitulation.get('before_toilet', 0),
-        recapitulation.get('after_toilet', 0),
-        recapitulation.get('before_gudang', 0),
-        recapitulation.get('after_gudang', 0),
-        recapitulation.get('before_ruang_sirkulasi', 0),
-        recapitulation.get('after_ruang_sirkulasi', 0),
-        recapitulation.get('before_tempat_bermain_olahraga', 0),
-        recapitulation.get('after_tempat_bermain_olahraga', 0),
-        recapitulation.get('before_ruang_tu', 0),
-        recapitulation.get('after_ruang_tu', 0),
-        recapitulation.get('before_ruang_konseling', 0),
-        recapitulation.get('after_ruang_konseling', 0),
-        recapitulation.get('before_ruang_osis', 0),
-        recapitulation.get('after_ruang_osis', 0),
-        recapitulation.get('before_bangunan', 0),
-        recapitulation.get('after_bangunan', 0),
-        recapitulation.get('rombel', 0)
-    ]
-
-    with open(filename, 'a', newline='', encoding='utf-8') as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow(row)
+    # --- MEMBANGUN DICTIONARY (ROW) ---
+    row_dict = {
+        'Nama_Sekolah': school_name,
+        'Provinsi': province,
+        'Kota': kota,
+        'Kecamatan': kecamatan,
+        'NPSN': identitas.get('NPSN', ''),
+        'Status': identitas.get('Status', ''),
+        'Bentuk_Pendidikan': identitas.get('Bentuk Pendidikan', ''),
+        'Status_Kepemilikan': identitas.get('Status Kepemilikan', ''),
+        'SK_Pendirian_Sekolah': identitas.get('SK Pendirian Sekolah', ''),
+        'Tanggal_SK_Pendirian': identitas.get('Tanggal SK Pendirian', ''),
+        'SK_Izin_Operasional': identitas.get('SK Izin Operasional', ''),
+        'Tanggal_SK_Izin_Operasional': identitas.get('Tanggal SK Izin Operasional', ''),
+        'Kebutuhan_Khusus_Dilayani': pelengkap.get('Kebutuhan Khusus Dilayani', ''),
+        'Nama_Bank': pelengkap.get('Nama Bank', ''),
+        'Cabang_KCP_Unit': pelengkap.get('Cabang KCP/Unit', ''),
+        'Rekening_Atas_Nama': pelengkap.get('Rekening Atas Nama', ''),
+        'Status_BOS': rinci.get('Status BOS', ''),
+        'Waku_Penyelenggaraan': rinci.get('Waku Penyelenggaraan', ''),
+        'Sertifikasi_ISO': rinci.get('Sertifikasi ISO', ''),
+        'Sumber_Listrik': rinci.get('Sumber Listrik', ''),
+        'Daya_Listrik': rinci.get('Daya Listrik', ''),
+        'Kecepatan_Internet': rinci.get('Kecepatan Internet', ''),
+        'Kepsek': sidebar.get('Kepsek', ''),
+        'Operator': sidebar.get('Operator', ''),
+        'Akreditasi': sidebar.get('Akreditasi', ''),
+        'Kurikulum': sidebar.get('Kurikulum', ''),
+        'Waktu': sidebar.get('Waktu', ''),
+        'Alamat': contact.get('Alamat', ''),
+        'RT_RW': contact.get('RT / RW', ''),
+        'Dusun': contact.get('Dusun', ''),
+        'Desa_Kelurahan': contact.get('Desa / Kelurahan', ''),
+        'Kecamatan_Detail': contact.get('Kecamatan', ''),
+        'Kabupaten': contact.get('Kabupaten', ''),
+        'Provinsi_Detail': contact.get('Provinsi', ''),
+        'Kode_Pos': contact.get('Kode Pos', ''),
+        'Lintang': contact.get('Lintang', ''),
+        'Bujur': contact.get('Bujur', ''),
+        'Guru_L': Guru_L, 'Guru_P': Guru_P, 'Guru_Total': Guru_Total,
+        'Tendik_L': Tendik_L, 'Tendik_P': Tendik_P, 'Tendik_Total': Tendik_Total,
+        'PTK_L': PTK_L, 'PTK_P': PTK_P, 'PTK_Total': PTK_Total,
+        'PD_L': PD_L, 'PD_P': PD_P, 'PD_Total': PD_Total,
+        'Before_Ruang_Kelas': recapitulation.get('before_ruang_kelas', 0),
+        'After_Ruang_Kelas': recapitulation.get('after_ruang_kelas', 0),
+        'Before_Ruang_Perpus': recapitulation.get('before_ruang_perpus', 0),
+        'After_Ruang_Perpus': recapitulation.get('after_ruang_perpus', 0),
+        'Before_Ruang_Lab': recapitulation.get('before_ruang_lab', 0),
+        'After_Ruang_Lab': recapitulation.get('after_ruang_lab', 0),
+        'Before_Ruang_Pratik': recapitulation.get('before_ruang_praktik', 0),
+        'After_Ruang_Pratik': recapitulation.get('after_ruang_praktik', 0),
+        'Before_Ruang_Pimpinan': recapitulation.get('before_ruang_pimpinan', 0),
+        'After_Ruang_Pimpinan': recapitulation.get('after_ruang_pimpinan', 0),
+        'Before_Ruang_Guru': recapitulation.get('before_ruang_guru', 0),
+        'After_Ruang_Guru': recapitulation.get('after_ruang_guru', 0),
+        'Before_Ruang_Ibadah': recapitulation.get('before_ruang_ibadah', 0),
+        'After_Ruang_Ibadah': recapitulation.get('after_ruang_ibadah', 0),
+        'Before_Ruang_UKS': recapitulation.get('before_ruang_uks', 0),
+        'After_Ruang_UKS': recapitulation.get('after_ruang_uks', 0),
+        'Before_Toilet': recapitulation.get('before_toilet', 0),
+        'After_Toilet': recapitulation.get('after_toilet', 0),
+        'Before_Gudang': recapitulation.get('before_gudang', 0),
+        'After_Gudang': recapitulation.get('after_gudang', 0),
+        'Before_Ruang_Sirkulasi': recapitulation.get('before_ruang_sirkulasi', 0),
+        'After_Ruang_Sirkulasi': recapitulation.get('after_ruang_sirkulasi', 0),
+        'Before_Tempat_Bermain_Olahraga': recapitulation.get('before_tempat_bermain_olahraga', 0),
+        'After_Tempat_Bermain_Olahraga': recapitulation.get('after_tempat_bermain_olahraga', 0),
+        'Before_Ruang_TU': recapitulation.get('before_ruang_tu', 0),
+        'After_Ruang_TU': recapitulation.get('after_ruang_tu', 0),
+        'Before_Ruang_Konseling': recapitulation.get('before_ruang_konseling', 0),
+        'After_Ruang_Konseling': recapitulation.get('after_ruang_konseling', 0),
+        'Before_Ruang_OSIS': recapitulation.get('before_ruang_osis', 0),
+        'After_Ruang_OSIS': recapitulation.get('after_ruang_osis', 0),
+        'Before_Bangunan': recapitulation.get('before_bangunan', 0),
+        'After_Bangunan': recapitulation.get('after_bangunan', 0),
+        'Rombel': recapitulation.get('rombel', 0)
+    }
+    
+    return row_dict
 
 def parse_html(url: str):
     """Mengurai (parse) halaman HTML detail sekolah dan mengambil data profil/kontak."""
+    # ... (fungsi ini tidak diubah secara signifikan, karena logika ekstraksi sudah benar) ...
     req = request_html(url)
     if not req:
-        # Jika request_html gagal mengambil konten
         return json.dumps({"profile": {}, "recapitulation": {}, "contact": {}}, ensure_ascii=False)
     
     soup = BeautifulSoup(req, 'html.parser')
@@ -223,18 +200,16 @@ def parse_html(url: str):
     # 1. Mengambil data PROFIL
     profile_panels = soup.select('#profil .panel-info')
     
-    # Untuk menyimpan data sidebar (Kepsek, Akreditasi, dll.)
     sidebar_data = {}
     
     for panel in profile_panels:
         heading = panel.find(class_='panel-heading').get_text(strip=True)
         body = panel.find(class_='panel-body')
         section_data = {}
-        if body: # Pastikan body ada
+        if body:
             for p in body.find_all('p'):
                 if p.find('strong'):
                     key = p.find('strong').get_text(strip=True).replace(':', '').strip()
-                    # Ambil teks setelah tag <strong>
                     value = p.strong.next_sibling.strip() if p.strong.next_sibling else ''
                     section_data[key] = value
             
@@ -253,7 +228,7 @@ def parse_html(url: str):
             if ':' in text:
                 key, value = text.split(':', 1)
                 sidebar_data[key.strip()] = value.strip()
-    school_data["profile"]["sidebar_info"] = sidebar_data # Masukkan sidebar data ke school_data
+    school_data["profile"]["sidebar_info"] = sidebar_data
 
     # 2. Mengambil data KONTAK
     contact_panel = soup.select_one('#kontak .panel-info')
@@ -280,16 +255,15 @@ def parse_html(url: str):
     sekolah_id = url.split('/')[-1].strip()
     recapitulation_list = request_api(sekolah_id=sekolah_id)
     if recapitulation_list and isinstance(recapitulation_list, list) and len(recapitulation_list) > 0:
-        # Kita ambil elemen pertama dari list rekapitulasi
         school_data["recapitulation"] = recapitulation_list[0]
     else:
-        # Jika gagal atau kosong, pastikan rekapitulasi adalah dictionary kosong
         school_data["recapitulation"] = {}
 
     return json.dumps(school_data, indent=4, ensure_ascii=False)
 
 def lat_lon_parse(url: str):
     """Mengambil koordinat Lintang dan Bujur dari halaman referensi."""
+    # ... (fungsi ini tidak diubah, namun sekarang menggunakan request_html yang sudah di-update) ...
     req = request_html(url)
     if not req:
         return None, None
@@ -316,6 +290,9 @@ def lat_lon_parse(url: str):
 def main():
     """Fungsi utama untuk menjalankan proses scraping dengan filter Kota/Kabupaten Bogor."""
     
+    # ⚠️ PERUBAHAN 6: INISIASI LIST KOSONG UNTUK MENYIMPAN SEMUA DATA DI MEMORI
+    all_school_data = []
+
     # 1. Pilihan Provinsi
     response_provinsi = request_api()
     if not response_provinsi:
@@ -354,7 +331,7 @@ def main():
         print(f"Gagal mengambil data Kota/Kabupaten untuk {provinsi_nama}.")
         return
         
-    # --- LOGIKA FILTER BOGOR ---
+    # --- LOGIKA FILTER KOTA/KABUPATEN ---
     kota_targets = []
     if provinsi_nama.upper() == "JAWA BARAT":
         print(f"\n✨ DETEKSI: Provinsi {provinsi_nama} dipilih. Menerapkan filter 'Kab. Bogor' dan 'Kota Bogor'...")
@@ -378,9 +355,10 @@ def main():
         csv_filename = f'{output_dir}/{provinsi_nama.replace(" ", "_")}_ALL_data.csv'
 
 
-    # Buat header CSV
-    create_csv_header(csv_filename)
-    print(f"\nCSV header berhasil dibuat di: {csv_filename}")
+    # ⚠️ PERUBAHAN 7: Hapus create_csv_header()
+    # create_csv_header(csv_filename)
+    # print(f"\nCSV header berhasil dibuat di: {csv_filename}")
+    print(f"\nCSV akan dibuat setelah scraping selesai di: {csv_filename}") # Pemberitahuan baru
     
     print(f"\n--- Memulai Scraping Provinsi: {provinsi_nama} ---")
 
@@ -401,14 +379,9 @@ def main():
             print(f"    Kecamatan: {kecamatan['nama']}")
             kecamatan_level = kecamatan['id_level_wilayah']
             
-            # Kode API untuk Sekolah di level Kecamatan (LEVEL 4)
-            # Di kode asli, request_api dipanggil dengan level_wilayah=kecamatan_level (yang nilainya 3)
-            # dan kode_wilayah: kode_kecamatan + '&bentuk_pendidikan_id='
             kecamatan_kode = kecamatan['kode_wilayah'].strip() + '&bentuk_pendidikan_id='
             
             # Level 4: Sekolah
-            # Karena kode_wilayah sudah disesuaikan dengan kebutuhan API sekolah (level 4), 
-            # kita tetap menggunakan struktur pemanggilan API yang sama dengan kode asli:
             response_sekolah = request_api(level_wilayah=kecamatan_level, kode_wilayah=kecamatan_kode, semester_id=SEMESTER_ID)
             
             if not response_sekolah:
@@ -434,21 +407,36 @@ def main():
                         school_detail_json = parse_html(school_url)
                         school_data = json.loads(school_detail_json)
 
-                        # Tambahkan ke CSV
-                        append_to_csv(
-                            csv_filename,
+                        # ⚠️ PERUBAHAN 8: Ganti append_to_csv dengan extract_data_to_dict dan append ke list
+                        final_row_dict = extract_data_to_dict(
                             school_data,
                             sekolah_nama,
                             provinsi_nama,
                             kota['nama'],
                             kecamatan['nama']
                         )
-                        print(f"        [SUCCESS] Data {sekolah_nama} ditambahkan ke CSV.")
+                        
+                        all_school_data.append(final_row_dict)
+                        print(f"        [SUCCESS] Data {sekolah_nama} berhasil diekstraksi ke memori.")
                         time.sleep(1) # Jeda sebentar antar sekolah
                         
                     except Exception as e:
                         print(f"        [ERROR] Gagal memproses sekolah {sekolah_nama}: {e}")
                         time.sleep(3) # Jeda lebih lama jika ada error
+    
+    # ⚠️ PERUBAHAN 9: TULIS DATA KE CSV HANYA SEKALI MENGGUNAKAN PANDAS
+    print(f"\n--- Scraping Selesai. Total {len(all_school_data)} data ditemukan. Menulis ke CSV ---")
+    if all_school_data:
+        try:
+            df = pd.DataFrame(all_school_data)
+            # Menulis DataFrame ke CSV
+            df.to_csv(csv_filename, index=False, encoding='utf-8')
+            print(f"✅ Penulisan Berhasil! Data disimpan di: {csv_filename}")
+        except Exception as e:
+            print(f"❌ ERROR saat menulis ke CSV menggunakan Pandas: {e}")
+    else:
+        print("TIDAK ADA DATA sekolah yang berhasil di-scrape.")
+
 
 if __name__ == '__main__':
     main()

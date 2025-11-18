@@ -2,227 +2,139 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import json
+import pandas as pd
 import csv
 import time
 import urllib3
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor # <--- Modul baru untuk kecepatan
 
-# Menonaktifkan peringatan SSL (penting untuk Dapodik)
+# Menonaktifkan peringatan SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- KONSTANTA GLOBAL ---
 BASE_URL = 'https://dapo.kemendikdasmen.go.id'
-# SEMESTER_ID: 20251 = Semester Genap TA 2024/2025
-SEMESTER_ID = '20251' 
+SEMESTER_ID = '20251' # Ganti sesuai semester yang diinginkan
+LEVEL_WILAYAH = '0'
+KODE_WILAYAH = '000000'
 
-PROVINSI_TARGET = 'Prov. Jawa Barat' 
-KOTA_TARGETS = ['Kota Bogor', 'Kab. Bogor'] 
+# --- KONSTANTA GLOBAL UNTUK BACKUP ---
+BACKUP_THRESHOLD = 50 # Jumlah sekolah per backup
+BACKUP_COUNTER = 0     # Counter sekolah (akan di-reset per kota)
 
-# Konfigurasi Threading untuk Kecepatan
-MAX_WORKERS = 10 # Batasan jumlah permintaan paralel
-# Catatan: time.sleep(1) telah dihapus dari loop pemrosesan.
+# Membuat sesi Request Global untuk koneksi yang lebih efisien
+session = requests.Session()
 
-# --- HELPER FUNCTIONS (API & HTML REQUESTS) ---
-# (Semua helper functions di atas (request_api, get_wilayah_data, dll.) tetap sama)
+def save_backup(all_school_data, kota_nama, output_dir, final_write=False):
+    """Menyimpan data yang ada di memori ke file CSV backup."""
+    
+    if final_write:
+        data_to_save = all_school_data
+    else:
+        # Hanya simpan data dari backup counter terakhir
+        start_index = max(0, len(all_school_data) - BACKUP_THRESHOLD)
+        data_to_save = all_school_data[start_index:]
 
-def request_api(url: str) -> list:
-    # ... (fungsi ini tetap sama seperti sebelumnya) ...
+    if not data_to_save:
+        return
+        
+    kota_nama_bersih = kota_nama.replace(' ', '_').replace('/', '_')
+    base_filename = f"backup_run_{kota_nama_bersih}"
+    backup_dir = os.path.join(output_dir, 'backup')
+    os.makedirs(backup_dir, exist_ok=True)
+    backup_path = os.path.join(backup_dir, base_filename)
+    
+    # Mencari nomor backup yang belum terpakai (incremental naming)
+    i = 0
+    while os.path.exists(f"{backup_path}_{i}.csv"):
+        i += 1
+        
+    if final_write:
+        file_number = 0
+        final_filename = f"{backup_path}_FINAL.csv" 
+        print(f"      [FINAL BACKUP] Menyimpan total {len(data_to_save)} baris ke {os.path.basename(final_filename)}")
+    else:
+        file_number = i
+        final_filename = f"{backup_path}_{file_number}.csv"
+        print(f"      [INCREMENTAL BACKUP] Menyimpan {len(data_to_save)} baris ke {os.path.basename(final_filename)}")
+
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        req = requests.get(url, timeout=15, headers=headers)
-        if req.status_code == 200:
-            if not req.text:
-                return []
-            return req.json()
+        df = pd.DataFrame(data_to_save)
+        df.to_csv(final_filename, index=False, encoding='utf-8')
+
+    except Exception as e:
+        print(f"❌ ERROR saat menyimpan backup ke {final_filename}: {e}")
+
+
+def request_api(base_url: str = BASE_URL, level_wilayah: str = LEVEL_WILAYAH, kode_wilayah: str = KODE_WILAYAH, semester_id: str = SEMESTER_ID, sekolah_id: str = None) -> list:
+    """Mengambil data wilayah atau rekapitulasi sekolah dari API Dapo."""
+    global session
+    try:
+        if sekolah_id:
+            url = f'{base_url}/rekap/sekolahDetail?semester_id={semester_id}&sekolah_id={sekolah_id}'
+        elif level_wilayah == 3:
+            url = f'{base_url}/rekap/progresSP?id_level_wilayah={level_wilayah}&kode_wilayah={kode_wilayah}&semester_id={semester_id}&bentuk_pendidikan_id='
         else:
-            print(f"    [API ERROR] Status {req.status_code} untuk URL: {url}")
+            url = f'{base_url}/rekap/dataSekolah?id_level_wilayah={level_wilayah}&kode_wilayah={kode_wilayah}&semester_id={semester_id}'
+
+        req = session.get(url)
+        if req.status_code != 200:
+            print(f"API Error {req.status_code} for URL: {url}")
             return []
-    except requests.exceptions.RequestException as e:
-        print(f"    [NETWORK ERROR] Gagal request API ({e}). URL: {url}")
+        return req.json()
+    except Exception as e:
+        print(f"Error requesting API for {kode_wilayah}: {e}")
         return []
 
-def get_wilayah_data(id_level_wilayah: str, kode_wilayah: str, semester_id: str) -> list:
-    # ... (fungsi ini tetap sama seperti sebelumnya) ...
-    url = f'{BASE_URL}/rekap/dataSekolah?id_level_wilayah={id_level_wilayah}&kode_wilayah={kode_wilayah}&semester_id={semester_id}'
-        
-    return request_api(url)
 
-def get_recapitulation_data(sekolah_id: str, semester_id: str) -> dict:
-    # ... (fungsi ini tetap sama seperti sebelumnya) ...
-    url = f'{BASE_URL}/rekap/sekolahDetail?semester_id={semester_id}&sekolah_id={sekolah_id}'
-    recap_list = request_api(url)
+def request_html(url: str, initial_backoff: float = 2.0) -> str:
+    """Mengambil konten HTML dengan mekanisme retry TANPA BATAS untuk mencegah skip data."""
+    global session
+    backoff = initial_backoff
+    attempt = 0
     
-    if recap_list and isinstance(recap_list, list) and len(recap_list) > 0:
-        return recap_list[0]
-    return {}
-
-def request_html(url: str, max_retries: int = 3) -> str:
-    """Mengambil konten HTML dengan mekanisme retry sederhana."""
-    backoff = 2.0
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    for attempt in range(max_retries):
+    while True:
+        attempt += 1
         try:
-            # Menggunakan verify=False karena Dapodik sering memiliki isu SSL
-            res = requests.get(url, verify=False, timeout=15, headers=headers) 
-            if res.status_code == 200:
-                if "User validation required" in res.text or "Checking your browser" in res.text:
-                    print(f"        [WARNING] Validasi Pengguna Ditemukan. Retrying ({attempt+1}/{max_retries})...")
-                    time.sleep(backoff)
-                    backoff *= 2 
-                    continue
-                return res.text
-            elif res.status_code == 404:
-                return ""
-            else:
-                 print(f"        [HTML ERROR] Status {res.status_code} untuk URL: {url}")
-                 return ""
-        except requests.exceptions.RequestException as e:
-            print(f"        [NETWORK ERROR] {e}, retrying ({attempt+1}/{max_retries}) in {backoff}s...")
-            time.sleep(backoff)
-            backoff *= 2
-    return ""
-
-def lat_lon_parse(url: str) -> tuple[str, str]:
-    # ... (fungsi ini tetap sama seperti sebelumnya) ...
-    req = request_html(url)
-    if not req:
-        return None, None
-        
-    soup = BeautifulSoup(req, 'html.parser')
-    latitude = None
-    longitude = None
-    scripts = soup.find_all('script')
-
-    for script in scripts:
-        if script.string and "L.map('maps').setView" in script.string: 
-            lat_search = re.search(r"lat:\s*(-?\d+\.\d+)", script.string)
-            lon_search = re.search(r"lon:\s*(-?\d+\.\d+)", script.string)
-
-            if lat_search:
-                latitude = lat_search.group(1)
-            if lon_search:
-                longitude = lon_search.group(1)
-            break
-    return latitude, longitude
-
-def parse_html(url: str) -> dict:
-    # ... (fungsi ini tetap sama seperti sebelumnya) ...
-    req = request_html(url)
-    school_data = {"profile": {}, "recapitulation": {}, "contact": {}}
-    
-    if not req:
-        return school_data
-        
-    soup = BeautifulSoup(req, 'html.parser')
-    
-    # --- 1. Ambil Data Profil & Sidebar ---
-    sidebar_data = {} 
-    
-    profile_panels = soup.select('#profil .panel-info')
-    for panel in profile_panels:
-        heading = panel.find(class_='panel-heading').get_text(strip=True)
-        body = panel.find(class_='panel-body')
-        section_data = {}
-        if body: 
-            for p in body.find_all('p'):
-                if p.find('strong'):
-                    key = p.find('strong').get_text(strip=True).replace(':', '').strip()
-                    value = p.strong.next_sibling.strip() if p.strong.next_sibling else '' 
-                    section_data[key] = value
+            if not url.startswith('http'):
+                raise ValueError(f"Invalid URL: {url}")
             
-            if "Identitas" in heading:
-                school_data["profile"]["identitas_sekolah"] = section_data
-            elif "Pelengkap" in heading:
-                school_data["profile"]["data_pelengkap"] = section_data
-            elif "Rinci" in heading:
-                school_data["profile"]["data_rinci"] = section_data
-
-    sidebar_menu = soup.find(class_='profile-usermenu')
-    if sidebar_menu:
-        for item in sidebar_menu.find_all('li'):
-            text = item.get_text(strip=True)
-            if ':' in text:
-                key, value = text.split(':', 1)
-                sidebar_data[key.strip()] = value.strip()
-    school_data["profile"]["sidebar_info"] = sidebar_data 
-
-    # --- 2. Ambil Data Kontak ---
-    contact_panel = soup.select_one('#kontak .panel-info')
-    if contact_panel:
-        contact_info = {}
-        for p in contact_panel.find_all('p'):
-            if p.find('strong'):
-                key = p.find('strong').get_text(strip=True).replace(':', '').strip()
-                value = p.strong.next_sibling.strip() if p.strong.next_sibling else ''
-                contact_info[key] = value
-        school_data["contact"] = contact_info
-        
-    # --- 3. Ambil Koordinat (Lintang/Bujur) ---
-    npsn = school_data["profile"].get("identitas_sekolah", {}).get("NPSN", "")
-    if npsn:
-        urls_latlon = f'https://referensi.data.kemdikbud.go.id/pendidikan/npsn/{npsn}'
-        latitude, longitude = lat_lon_parse(urls_latlon)
-
-        if latitude or longitude:
-            school_data["contact"]["Lintang"] = latitude
-            school_data["contact"]["Bujur"] = longitude
-
-    # --- 4. Ambil Data Rekapitulasi (API Call) ---
-    sekolah_id = url.split('/')[-1].strip()
-    school_data["recapitulation"] = get_recapitulation_data(sekolah_id, SEMESTER_ID)
-
-    return school_data
-
-# --- CSV HANDLER FUNCTIONS ---
-
-def create_csv_header(filename):
-    # ... (fungsi ini tetap sama seperti sebelumnya) ...
-    headers = [
-        'Nama_Sekolah', 'Provinsi', 'Kota', 'Kecamatan',
-        'NPSN', 'Status', 'Bentuk_Pendidikan', 'Status_Kepemilikan',
-        'SK_Pendirian_Sekolah', 'Tanggal_SK_Pendirian', 'SK_Izin_Operasional',
-        'Tanggal_SK_Izin_Operasional', 'Kebutuhan_Khusus_Dilayani', 'Nama_Bank',
-        'Cabang_KCP_Unit', 'Rekening_Atas_Nama', 'Status_BOS',
-        'Waku_Penyelenggaraan', 'Sertifikasi_ISO', 'Sumber_Listrik',
-        'Daya_Listrik', 'Kecepatan_Internet', 'Kepsek', 'Operator',
-        'Akreditasi', 'Kurikulum', 'Waktu', 'Alamat', 'RT_RW',
-        'Dusun', 'Desa_Kelurahan', 'Kecamatan_Detail', 'Kabupaten',
-        'Provinsi_Detail', 'Kode_Pos', 'Lintang', 'Bujur', 'Guru_L', 'Guru_P', 'Guru_Total',
-        'Tendik_L', 'Tendik_P', 'Tendik_Total', 'PTK_L', 'PTK_P', 'PTK_Total', 'PD_L', 'PD_P', 'PD_Total',
-        'Before_Ruang_Kelas', 'After_Ruang_Kelas', 'Before_Ruang_Perpus', 'After_Ruang_Perpus',
-        'Before_Ruang_Lab', 'After_Ruang_Lab', 'Before_Ruang_Pratik', 'After_Ruang_Pratik',
-        'Before_Ruang_Pimpinan', 'After_Ruang_Pimpinan', 'Before_Ruang_Guru', 'After_Ruang_Guru',
-        'Before_Ruang_Ibadah', 'After_Ruang_Ibadah', 'Before_Ruang_UKS', 'After_Ruang_UKS',
-        'Before_Toilet', 'After_Toilet', 'Before_Gudang', 'After_Gudang',
-        'Before_Ruang_Sirkulasi', 'After_Ruang_Sirkulasi', 'Before_Tempat_Bermain_Olahraga', 'After_Tempat_Bermain_Olahraga',
-        'Before_Ruang_TU', 'After_Ruang_TU', 'Before_Ruang_Konseling', 'After_Ruang_Konseling',
-        'Before_Ruang_OSIS', 'After_Ruang_OSIS', 'Before_Bangunan', 'After_Bangunan', 'Rombel'
-    ]
-
-    try:
-        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(headers)
-    except IOError as e:
-        print(f"FATAL: Gagal membuat file CSV {filename}. Pastikan tidak terbuka. Error: {e}")
-        sys.exit(1)
+            res = session.get(url, verify=False, timeout=15) 
+            
+            if res.status_code == 404:
+                print(f"         [WARNING] 404 Not Found di URL ini. Mengembalikan string kosong.")
+                return ""
+            
+            if "User validation required" in res.text or "Checking your browser" in res.text:
+                print(f"         [WARNING] Validasi Pengguna Ditemukan (Attempt {attempt}). Retrying in {backoff}s...")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+                continue
+            
+            return res.text
+            
+        except requests.RequestException as e:
+            print(f"         [NETWORK ERROR] {e} (Attempt {attempt}), retrying in {backoff}s...")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+            
+        except ValueError as e:
+            print(f"         [FATAL ERROR] {e}. Menghentikan request ini.")
+            return ""
 
 
-def append_to_csv(filename, school_data, school_name, province, kota, kecamatan):
-    # ... (fungsi ini tetap sama seperti sebelumnya) ...
+def extract_data_to_dict(school_data, school_name, province, kota, kecamatan):
+    """Mengubah data sekolah hasil scrape menjadi satu dictionary (row)."""
     profile = school_data.get('profile', {})
     contact = school_data.get('contact', {})
-    recapitulation = school_data.get('recapitulation', {}) 
+    recapitulation = school_data.get('recapitulation', {})
 
-    # Extract data with default empty values
     identitas = profile.get('identitas_sekolah', {})
     pelengkap = profile.get('data_pelengkap', {})
     rinci = profile.get('data_rinci', {})
     sidebar = profile.get('sidebar_info', {})
 
-    # Hitungan Total PTK dan PD
+    # --- PENGHITUNGAN TOTAL REKAPITULASI ---
     Guru_L = recapitulation.get('ptk_laki', 0)
     Guru_P = recapitulation.get('ptk_perempuan', 0)
     Guru_Total = Guru_L + Guru_P
@@ -239,246 +151,375 @@ def append_to_csv(filename, school_data, school_name, province, kota, kecamatan)
     PD_P = recapitulation.get('pd_perempuan', 0)
     PD_Total = PD_L + PD_P
 
-    # Baris Data
-    row = [
-        school_name,province, kota, kecamatan,
-        identitas.get('NPSN', ''),
-        identitas.get('Status', ''),
-        identitas.get('Bentuk Pendidikan', ''),
-        identitas.get('Status Kepemilikan', ''),
-        identitas.get('SK Pendirian Sekolah', ''),
-        identitas.get('Tanggal SK Pendirian', ''),
-        identitas.get('SK Izin Operasional', ''),
-        identitas.get('Tanggal SK Izin Operasional', ''),
-        pelengkap.get('Kebutuhan Khusus Dilayani', ''),
-        pelengkap.get('Nama Bank', ''),
-        pelengkap.get('Cabang KCP/Unit', ''),
-        pelengkap.get('Rekening Atas Nama', ''),
-        rinci.get('Status BOS', ''),
-        rinci.get('Waku Penyelenggaraan', ''),
-        rinci.get('Sertifikasi ISO', ''),
-        rinci.get('Sumber Listrik', ''),
-        rinci.get('Daya Listrik', ''),
-        rinci.get('Kecepatan Internet', ''),
-        sidebar.get('Kepsek', ''),
-        sidebar.get('Operator', ''),
-        sidebar.get('Akreditasi', ''),
-        sidebar.get('Kurikulum', ''),
-        sidebar.get('Waktu', ''),
-        contact.get('Alamat', ''),
-        contact.get('RT / RW', ''),
-        contact.get('Dusun', ''),
-        contact.get('Desa / Kelurahan', ''),
-        contact.get('Kecamatan', ''),
-        contact.get('Kabupaten', ''),
-        contact.get('Provinsi', ''),
-        contact.get('Kode Pos', ''),
-        contact.get('Lintang', ''),
-        contact.get('Bujur', ''),
-        Guru_L, Guru_P, Guru_Total,
-        Tendik_L, Tendik_P, Tendik_Total,
-        PTK_L, PTK_P, PTK_Total,
-        PD_L, PD_P, PD_Total,
-        recapitulation.get('before_ruang_kelas', 0),
-        recapitulation.get('after_ruang_kelas', 0),
-        recapitulation.get('before_ruang_perpus', 0),
-        recapitulation.get('after_ruang_perpus', 0),
-        recapitulation.get('before_ruang_lab', 0),
-        recapitulation.get('after_ruang_lab', 0),
-        recapitulation.get('before_ruang_praktik', 0),
-        recapitulation.get('after_ruang_praktik', 0),
-        recapitulation.get('before_ruang_pimpinan', 0),
-        recapitulation.get('after_ruang_pimpinan', 0),
-        recapitulation.get('before_ruang_guru', 0),
-        recapitulation.get('after_ruang_guru', 0),
-        recapitulation.get('before_ruang_ibadah', 0),
-        recapitulation.get('after_ruang_ibadah', 0),
-        recapitulation.get('before_ruang_uks', 0),
-        recapitulation.get('after_ruang_uks', 0),
-        recapitulation.get('before_toilet', 0),
-        recapitulation.get('after_toilet', 0),
-        recapitulation.get('before_gudang', 0),
-        recapitulation.get('after_gudang', 0),
-        recapitulation.get('before_ruang_sirkulasi', 0),
-        recapitulation.get('after_ruang_sirkulasi', 0),
-        recapitulation.get('before_tempat_bermain_olahraga', 0),
-        recapitulation.get('after_tempat_bermain_olahraga', 0),
-        recapitulation.get('before_ruang_tu', 0),
-        recapitulation.get('after_ruang_tu', 0),
-        recapitulation.get('before_ruang_konseling', 0),
-        recapitulation.get('after_ruang_konseling', 0),
-        recapitulation.get('before_ruang_osis', 0),
-        recapitulation.get('after_ruang_osis', 0),
-        recapitulation.get('before_bangunan', 0),
-        recapitulation.get('after_bangunan', 0),
-        recapitulation.get('rombel', 0)
-    ]
+    # --- MEMBANGUN DICTIONARY (ROW) ---
+    row_dict = {
+        'Nama_Sekolah': school_name,
+        'Provinsi': province,
+        'Kota': kota,
+        'Kecamatan': kecamatan,
+        'NPSN': identitas.get('NPSN', ''),
+        'Status': identitas.get('Status', ''),
+        'Bentuk_Pendidikan': identitas.get('Bentuk Pendidikan', ''),
+        'Status_Kepemilikan': identitas.get('Status Kepemilikan', ''),
+        'SK_Pendirian_Sekolah': identitas.get('SK Pendirian Sekolah', ''),
+        'Tanggal_SK_Pendirian': identitas.get('Tanggal SK Pendirian', ''),
+        'SK_Izin_Operasional': identitas.get('SK Izin Operasional', ''),
+        'Tanggal_SK_Izin_Operasional': identitas.get('Tanggal SK Izin Operasional', ''),
+        'Kebutuhan_Khusus_Dilayani': pelengkap.get('Kebutuhan Khusus Dilayani', ''),
+        'Nama_Bank': pelengkap.get('Nama Bank', ''),
+        'Cabang_KCP_Unit': pelengkap.get('Cabang KCP/Unit', ''),
+        'Rekening_Atas_Nama': pelengkap.get('Rekening Atas Nama', ''),
+        'Status_BOS': rinci.get('Status BOS', ''),
+        'Waku_Penyelenggaraan': rinci.get('Waku Penyelenggaraan', ''),
+        'Sertifikasi_ISO': rinci.get('Sertifikasi ISO', ''),
+        'Sumber_Listrik': rinci.get('Sumber Listrik', ''),
+        'Daya_Listrik': rinci.get('Daya Listrik', ''),
+        'Kecepatan_Internet': rinci.get('Kecepatan Internet', ''),
+        'Kepsek': sidebar.get('Kepsek', ''),
+        'Operator': sidebar.get('Operator', ''),
+        'Akreditasi': sidebar.get('Akreditasi', ''),
+        'Kurikulum': sidebar.get('Kurikulum', ''),
+        'Waktu': sidebar.get('Waktu', ''),
+        'Alamat': contact.get('Alamat', ''),
+        'RT_RW': contact.get('RT / RW', ''),
+        'Dusun': contact.get('Dusun', ''),
+        'Desa_Kelurahan': contact.get('Desa / Kelurahan', ''),
+        'Kecamatan_Detail': contact.get('Kecamatan', ''),
+        'Kabupaten': contact.get('Kabupaten', ''),
+        'Provinsi_Detail': contact.get('Provinsi', ''),
+        'Kode_Pos': contact.get('Kode Pos', ''),
+        'Lintang': contact.get('Lintang', ''),
+        'Bujur': contact.get('Bujur', ''),
+        'Guru_L': Guru_L, 'Guru_P': Guru_P, 'Guru_Total': Guru_Total,
+        'Tendik_L': Tendik_L, 'Tendik_P': Tendik_P, 'Tendik_Total': Tendik_Total,
+        'PTK_L': PTK_L, 'PTK_P': PTK_P, 'PTK_Total': PTK_Total,
+        'PD_L': PD_L, 'PD_P': PD_P, 'PD_Total': PD_Total,
+        'Before_Ruang_Kelas': recapitulation.get('before_ruang_kelas', 0),
+        'After_Ruang_Kelas': recapitulation.get('after_ruang_kelas', 0),
+        'Before_Ruang_Perpus': recapitulation.get('before_ruang_perpus', 0),
+        'After_Ruang_Perpus': recapitulation.get('after_ruang_perpus', 0),
+        'Before_Ruang_Lab': recapitulation.get('before_ruang_lab', 0),
+        'After_Ruang_Lab': recapitulation.get('after_ruang_lab', 0),
+        'Before_Ruang_Pratik': recapitulation.get('before_ruang_praktik', 0),
+        'After_Ruang_Pratik': recapitulation.get('after_ruang_praktik', 0),
+        'Before_Ruang_Pimpinan': recapitulation.get('before_ruang_pimpinan', 0),
+        'After_Ruang_Pimpinan': recapitulation.get('after_ruang_pimpinan', 0),
+        'Before_Ruang_Guru': recapitulation.get('before_ruang_guru', 0),
+        'After_Ruang_Guru': recapitulation.get('after_ruang_guru', 0),
+        'Before_Ruang_Ibadah': recapitulation.get('before_ruang_ibadah', 0),
+        'After_Ruang_Ibadah': recapitulation.get('after_ruang_ibadah', 0),
+        'Before_Ruang_UKS': recapitulation.get('before_ruang_uks', 0),
+        'After_Ruang_UKS': recapitulation.get('after_ruang_uks', 0),
+        'Before_Toilet': recapitulation.get('before_toilet', 0),
+        'After_Toilet': recapitulation.get('after_toilet', 0),
+        'Before_Gudang': recapitulation.get('before_gudang', 0),
+        'After_Gudang': recapitulation.get('after_gudang', 0),
+        'Before_Ruang_Sirkulasi': recapitulation.get('before_ruang_sirkulasi', 0),
+        'After_Ruang_Sirkulasi': recapitulation.get('after_ruang_sirkulasi', 0),
+        'Before_Tempat_Bermain_Olahraga': recapitulation.get('before_tempat_bermain_olahraga', 0),
+        'After_Tempat_Bermain_Olahraga': recapitulation.get('after_tempat_bermain_olahraga', 0),
+        'Before_Ruang_TU': recapitulation.get('before_ruang_tu', 0),
+        'After_Ruang_TU': recapitulation.get('after_ruang_tu', 0),
+        'Before_Ruang_Konseling': recapitulation.get('before_ruang_konseling', 0),
+        'After_Ruang_Konseling': recapitulation.get('after_ruang_konseling', 0),
+        'Before_Ruang_OSIS': recapitulation.get('before_ruang_osis', 0),
+        'After_Ruang_OSIS': recapitulation.get('after_ruang_osis', 0),
+        'Before_Bangunan': recapitulation.get('before_bangunan', 0),
+        'After_Bangunan': recapitulation.get('after_bangunan', 0),
+        'Rombel': recapitulation.get('rombel', 0)
+    }
+    
+    return row_dict
 
-    try:
-        with open(filename, 'a', newline='', encoding='utf-8') as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(row)
-    except IOError as e:
-        print(f"ERROR: Gagal menulis ke CSV {filename}. Error: {e}")
+def parse_html(url: str):
+    """Mengurai (parse) halaman HTML detail sekolah dan mengambil data profil/kontak."""
+    req = request_html(url)
+    if not req: 
+        return json.dumps({"profile": {}, "recapitulation": {}, "contact": {}}, ensure_ascii=False)
+    
+    soup = BeautifulSoup(req, 'html.parser')
+    school_data = {
+        "profile": {},
+        "recapitulation": {},
+        "contact": {}
+    }
+    
+    profile_panels = soup.select('#profil .panel-info')
+    sidebar_data = {}
+    
+    for panel in profile_panels:
+        heading = panel.find(class_='panel-heading').get_text(strip=True)
+        body = panel.find(class_='panel-body')
+        section_data = {}
+        if body:
+            for p in body.find_all('p'):
+                if p.find('strong'):
+                    key = p.find('strong').get_text(strip=True).replace(':', '').strip()
+                    value = p.strong.next_sibling.strip() if p.strong.next_sibling else ''
+                    section_data[key] = value
+            
+            if "Identitas" in heading:
+                school_data["profile"]["identitas_sekolah"] = section_data
+            elif "Pelengkap" in heading:
+                school_data["profile"]["data_pelengkap"] = section_data
+            elif "Rinci" in heading:
+                school_data["profile"]["data_rinci"] = section_data
 
+    sidebar_menu = soup.find(class_='profile-usermenu')
+    if sidebar_menu:
+        for item in sidebar_menu.find_all('li'):
+            text = item.get_text(strip=True)
+            if ':' in text:
+                key, value = text.split(':', 1)
+                sidebar_data[key.strip()] = value.strip()
+    school_data["profile"]["sidebar_info"] = sidebar_data
 
-# --- FUNGSI BARU UNTUK PROSES PARALEL ---
+    contact_panel = soup.select_one('#kontak .panel-info')
+    if contact_panel:
+        contact_info = {}
+        for p in contact_panel.find_all('p'):
+            if p.find('strong'):
+                key = p.find('strong').get_text(strip=True).replace(':', '').strip()
+                value = p.strong.next_sibling.strip() if p.strong.next_sibling else ''
+                contact_info[key] = value
+        school_data["contact"] = contact_info
 
-def process_school(school_info, csv_filename, provinsi_nama, kota_nama, kecamatan_nama):
-    """
-    Fungsi yang akan dijalankan oleh setiap worker thread.
-    Mengambil data detail sekolah dan menambahkannya ke CSV.
-    """
-    sekolah, sekolah_id_enkrip = school_info
-    required_keys = ['bentuk_pendidikan', 'status_sekolah', 'nama', 'sekolah_id_enkrip']
+    npsn = school_data["profile"].get("identitas_sekolah", {}).get("NPSN", "")
+    if npsn:
+        urls_latlon = f'https://referensi.data.kemdikbud.go.id/pendidikan/npsn/{npsn}'
+        latitude, longitude = lat_lon_parse(urls_latlon)
 
-    if not all(key in sekolah for key in required_keys):
-        return None # Lewati jika data API tidak lengkap
+        if latitude or longitude:
+            school_data["contact"]["Lintang"] = latitude
+            school_data["contact"]["Bujur"] = longitude
+
+    sekolah_id = url.split('/')[-1].strip()
+    recapitulation_list = request_api(sekolah_id=sekolah_id)
+    if recapitulation_list and isinstance(recapitulation_list, list) and len(recapitulation_list) > 0:
+        school_data["recapitulation"] = recapitulation_list[0]
+    else:
+        school_data["recapitulation"] = {}
+
+    return json.dumps(school_data, indent=4, ensure_ascii=False)
+
+def lat_lon_parse(url: str):
+    """Mengambil koordinat Lintang dan Bujur dari halaman referensi."""
+    req = request_html(url)
+    if not req:
+        return None, None
         
-    sekolah_nama = sekolah['nama']
-    print(f"      [STARTING] {sekolah_nama} ({sekolah['bentuk_pendidikan']} - {sekolah['status_sekolah']})") 
+    soup = BeautifulSoup(req, 'html.parser')
+    latitude = None
+    longitude = None
+    scripts = soup.find_all('script')
 
-    try:
-        # 6. HTML Scraping (Detail Sekolah)
-        school_url = f"https://dapo.dikdasmen.go.id/sekolah/{sekolah_id_enkrip}"
-        
-        school_data = parse_html(school_url)
+    for script in scripts:
+        if script.string:
+            if "L.map('maps').setView" in script.string:
+                lat_search = re.search(r"lat:\s*(-?\d+\.\d+)", script.string)
+                lon_search = re.search(r"lon:\s*(-?\d+\.\d+)", script.string)
 
-        append_to_csv(
-            csv_filename, 
-            school_data, 
-            sekolah_nama, 
-            provinsi_nama, 
-            kota_nama, 
-            kecamatan_nama
-        )
-        print(f"        [SUCCESS] Data {sekolah_nama} ditambahkan ke CSV.")
-        return 1
-        
-    except Exception as e:
-        print(f"        [ERROR] Gagal memproses detail sekolah {sekolah_nama}: {e}")
-        return 0
+                if lat_search:
+                    latitude = lat_search.group(1)
+                if lon_search:
+                    longitude = lon_search.group(1)
+                break
+    return latitude, longitude
 
-
-# --- MAIN EXECUTION (DIUBAH) ---
+def clean_province_name(name):
+    """Menghapus 'PROV.', spasi, dan titik dari nama provinsi untuk perbandingan yang konsisten."""
+    cleaned = name.upper()
+    
+    # 1. Hapus 'PROV.' jika ada
+    if 'PROV.' in cleaned:
+        cleaned = cleaned.replace('PROV.', '')
+    
+    # 2. Hapus titik
+    cleaned = cleaned.replace('.', '')
+    
+    # 3. Hapus spasi ganda dan spasi di awal/akhir
+    cleaned = ' '.join(cleaned.split())
+    
+    return cleaned.strip()
 
 def main():
-    start_time = time.time()
-    
-    print("--- ⚙️ Memulai Eksekusi Script Dapodik Scraper dengan Threading ---")
-    
-    # ... (Langkah 1 & 2: Mencari Provinsi dan Setup File/Direktori tetap sama) ...
-    
-    # 1. Mengambil dan Memilih Provinsi Jawa Barat
-    print("Mencari data provinsi...")
-    response_provinsi = get_wilayah_data('0', '000000', SEMESTER_ID)
-    
-    if not response_provinsi:
-        print("FATAL: Gagal mengambil daftar Provinsi dari API. Program dihentikan.")
-        sys.exit(1)
+    """Fungsi utama untuk menjalankan proses scraping."""
+    global BACKUP_COUNTER
+    all_school_data = []
 
-    province_target = next((prov for prov in response_provinsi if prov['nama'] == PROVINSI_TARGET), None)
-            
-    if not province_target:
-        print(f"FATAL: Provinsi target '{PROVINSI_TARGET}' tidak ditemukan. Program dihentikan.")
-        sys.exit(1)
+    # 1. Pilihan Provinsi
+    response_provinsi = request_api()
+    if not response_provinsi:
+        print("Gagal mengambil daftar Provinsi. Program dihentikan.")
+        return
+
+    # --- PENCARIAN & SELEKSI OTOMATIS JAWA BARAT ---
+    JAWA_BARAT_NAME_CLEAN = "JAWA BARAT" 
+    prov_num = -1 
+
+    print("Mencari provinsi target...")
+    
+    found_names = [] 
+    
+    for i, prov in enumerate(response_provinsi):
+        # Bersihkan nama provinsi dari API sebelum membandingkan
+        cleaned_api_name = clean_province_name(prov['nama'])
+        found_names.append(prov['nama'])
         
-    provinsi_nama = province_target['nama']
+        # Bandingkan nama yang sudah bersih
+        if cleaned_api_name == JAWA_BARAT_NAME_CLEAN:
+            prov_num = i
+            break
+            
+    if prov_num == -1:
+        print(f"[FATAL] Provinsi '{JAWA_BARAT_NAME_CLEAN}' tidak ditemukan dalam daftar API.")
+        print("Daftar provinsi yang ditemukan: ", found_names)
+        return
+        
+    province_target = response_provinsi[prov_num]
+    provinsi_nama = province_target['nama'].strip()
+    print(f"✨ Seleksi Otomatis: Provinsi **{provinsi_nama}** (Nomor: {prov_num}) dipilih.")
+    # --- END SELEKSI OTOMATIS ---
+    
+    # 2. Setup File dan Direktori
+    output_dir = './result'
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # --- INISIASI VARIABEL PROVINSI ---
     provinsi_level = province_target['id_level_wilayah']
     provinsi_kode = province_target['kode_wilayah'].strip()
 
-    # 2. Setup File dan Direktori
-    output_dir = './result'
-    os.makedirs(output_dir, exist_ok=True) 
-    csv_filename = f'{output_dir}/Data_Sekolah_{provinsi_nama.replace(" ", "_").replace(".", "")}_Bogor_Threading.csv' # Nama file diubah
+    # 3. Level 2: Kota/Kabupaten
+    response_kota_all = request_api(level_wilayah=provinsi_level, kode_wilayah=provinsi_kode, semester_id=SEMESTER_ID)
     
-    create_csv_header(csv_filename)
-    print(f"\n✅ CSV header berhasil dibuat di: {csv_filename}")
-    print(f"--- Memulai Scraping Provinsi: {provinsi_nama} ---")
-
-    # Kumpulkan semua tugas (sekolah) dalam satu list
-    all_schools_to_process = []
-    
-    # 3. Level 2: Kota/Kabupaten (Filter Bogor)
-    response_kota = get_wilayah_data(provinsi_level, provinsi_kode, SEMESTER_ID)
-    
-    if not response_kota:
-         print(f"ERROR: Gagal mengambil data Kota/Kabupaten untuk {provinsi_nama}.")
-         return
-
-    for kota in response_kota:
-        kota_nama = kota['nama']
+    if not response_kota_all:
+        print(f"Gagal mengambil data Kota/Kabupaten untuk {provinsi_nama}.")
+        return
         
-        if kota_nama not in KOTA_TARGETS:
-             continue 
+    # --- LOGIKA FILTER KOTA/KABUPATEN (Target: Kota Depok) ---
+    kota_targets = []
+    DEPOK_NAME = "KOTA DEPOK"
+    print(f"\n✨ DETEKSI: Provinsi {provinsi_nama} dipilih. Menerapkan filter **'{DEPOK_NAME}'**...")
+    
+    found_depok = False
+    for kota in response_kota_all:
+        # Gunakan .strip().upper() untuk perbandingan nama Kota/Kabupaten
+        if kota['nama'].strip().upper() == DEPOK_NAME:
+            kota_targets.append(kota)
+            found_depok = True
+            break
+            
+    if not found_depok:
+        print(f"[FATAL] Filter '{DEPOK_NAME}' gagal ditemukan di {provinsi_nama}. Program dihentikan.")
+        return
+    else:
+        print(f"Filter Berhasil Diterapkan. Hanya memproses: {DEPOK_NAME}")
+        # Nama file CSV berdasarkan provinsi yang sudah dibersihkan
+        csv_filename = f'{output_dir}/{clean_province_name(provinsi_nama).replace(" ", "_")}_DEPOK_data.csv'
+
+    print(f"\nCSV akan dibuat setelah scraping selesai di: {csv_filename}")
+    print(f"\n--- Memulai Scraping Kota: {DEPOK_NAME} ---")
+
+
+    for kota in kota_targets:
+        kota_nama_bersih = kota['nama'].strip().replace('/', '_')
+        print(f"  Kota: {kota['nama'].strip()}")
         
-        print(f"  [DIPROSES] Kota: {kota_nama}")
+        BACKUP_COUNTER = 0
+        
+        kota_level = kota['id_level_wilayah']
         kota_kode = kota['kode_wilayah'].strip()
 
-        # 4. Level 3: Kecamatan
-        response_kecamatan = get_wilayah_data('2', kota_kode, SEMESTER_ID)
+        # Level 3: Kecamatan
+        response_kecamatan = request_api(level_wilayah=kota_level, kode_wilayah=kota_kode, semester_id=SEMESTER_ID)
         
         if not response_kecamatan:
-            print(f"    ERROR: Gagal mengambil data Kecamatan untuk {kota_nama}")
+            print(f"  >>> Gagal mengambil data Kecamatan untuk {kota['nama'].strip()}")
             continue
 
         for kecamatan in response_kecamatan:
-            kecamatan_nama = kecamatan['nama']
-            print(f"    Kecamatan: {kecamatan_nama}")
-            kecamatan_kode = kecamatan['kode_wilayah'].strip() 
+            kecamatan_nama = kecamatan['nama'].strip()
+            print(f"    Kecamatan: {kecamatan_nama}")
+            kecamatan_level = kecamatan['id_level_wilayah']
             
-            # 5. Level 4: Sekolah (API Call)
-            response_sekolah = get_wilayah_data('4', kecamatan_kode, SEMESTER_ID)
+            kecamatan_kode = kecamatan['kode_wilayah'].strip() + '&bentuk_pendidikan_id='
+            
+            # Level 4: Sekolah
+            response_sekolah = request_api(level_wilayah=kecamatan_level, kode_wilayah=kecamatan_kode, semester_id=SEMESTER_ID)
             
             if not response_sekolah:
-                 continue
-                 
-            # Kumpulkan data sekolah yang akan diproses
+                print(f"    >>> Tidak ada data sekolah ditemukan atau gagal mengambil API sekolah untuk {kecamatan_nama}")
+                continue
+
+            jenjang_target = ['SD', 'SMP', 'SMA', 'SPK SD', 'SPK SMP', 'SPK SMA', 'SMK']
+            jenis_target = ['Negeri','Swasta']
+
             for sekolah in response_sekolah:
-                if all(key in sekolah for key in ['bentuk_pendidikan', 'status_sekolah', 'nama', 'sekolah_id_enkrip']):
+                if sekolah['bentuk_pendidikan'] in jenjang_target and sekolah['status_sekolah'] in jenis_target:
+                    
+                    sekolah_nama = sekolah['nama']
                     sekolah_id_enkrip = sekolah['sekolah_id_enkrip'].strip()
-                    # Simpan tuple (data sekolah, ID enkripsi, nama provinsi, nama kota, nama kecamatan)
-                    task_info = (sekolah, sekolah_id_enkrip, provinsi_nama, kota_nama, kecamatan_nama)
-                    all_schools_to_process.append(task_info)
+                    
+                    print(f"      Sekolah: {sekolah_nama}")
+                    
+                    try:
+                        school_url = f"https://dapo.dikdasmen.go.id/sekolah/{sekolah_id_enkrip}"
+                        
+                        school_detail_json = parse_html(school_url)
+                        school_data = json.loads(school_detail_json)
 
+                        final_row_dict = extract_data_to_dict(
+                            school_data, provinsi_nama, kota['nama'].strip(), kecamatan_nama, sekolah_nama
+                        )
+                        final_row_dict['Scrape_Status'] = 'SUCCESS'
 
-    # 6. Eksekusi Paralel Menggunakan ThreadPoolExecutor
-    total_tasks = len(all_schools_to_process)
-    processed_count = 0
-    success_count = 0
+                        all_school_data.append(final_row_dict)
+                        print(f"         [SUCCESS] Data {sekolah_nama} berhasil diekstraksi ke memori.")
+                        
+                        BACKUP_COUNTER += 1
+                        if BACKUP_COUNTER >= BACKUP_THRESHOLD:
+                            save_backup(all_school_data, kota_nama_bersih, output_dir, final_write=False)
+                            BACKUP_COUNTER = 0
+                        
+                        time.sleep(1)
+                        
+                    except Exception as e:
+                        error_message = str(e).splitlines()[0][:100] 
+                        
+                        minimal_row_dict = {
+                            'Nama_Sekolah': sekolah_nama,
+                            'Provinsi': provinsi_nama,
+                            'Kota': kota['nama'].strip(),
+                            'Kecamatan': kecamatan_nama,
+                            'NPSN': sekolah.get('npsn', ''),
+                            'Status': sekolah.get('status_sekolah', ''),
+                            'Scrape_Status': f"FAILED - {error_message}",
+                        }
+                        
+                        all_school_data.append(minimal_row_dict)
+                        print(f"         [ERROR] Gagal memproses sekolah {sekolah_nama}: {e}. Dicatat sebagai FAILED.")
+                        
+                        BACKUP_COUNTER += 1
+                        if BACKUP_COUNTER >= BACKUP_THRESHOLD:
+                            save_backup(all_school_data, kota_nama_bersih, output_dir, final_write=False)
+                            BACKUP_COUNTER = 0
+                        
+                        time.sleep(3)
     
-    print(f"\n--- ⚡️ Memulai Eksekusi Paralel untuk {total_tasks} Sekolah (Max Threads: {MAX_WORKERS}) ---")
+    # Simpan sisa data ke file backup final
+    if all_school_data:
+        save_backup(all_school_data, kota_nama_bersih, output_dir, final_write=True)
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # Siapkan argumen untuk setiap pemanggilan process_school
-        future_to_school = {
-            executor.submit(
-                process_school, 
-                task[0:2], # school_info = (sekolah, sekolah_id_enkrip)
-                csv_filename, 
-                task[2], task[3], task[4]
-            ): task[0]['nama'] for task in all_schools_to_process
-        }
-        
-        for future in future_to_school:
-            processed_count += 1
-            school_name = future_to_school[future]
-            try:
-                result = future.result()
-                if result == 1:
-                    success_count += 1
-            except Exception as exc:
-                print(f'    [CRITICAL ERROR] Thread untuk {school_name} menghasilkan pengecualian: {exc}')
-
-            print(f"Progress: {processed_count}/{total_tasks} ({success_count} Berhasil) - {school_name} Selesai.")
-    
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-
-    print("\n--- ✅ Proses Scraping Selesai ---")
-    print(f"Total Sekolah Ditemukan/Ditugaskan: {total_tasks}")
-    print(f"Total Sekolah Berhasil Diproses: {success_count}")
-    print(f"Waktu Eksekusi Total: {elapsed_time:.2f} detik")
+    print(f"\n--- Scraping Selesai. Total {len(all_school_data)} data ditemukan. Menulis ke CSV Final ---")
+    if all_school_data:
+        try:
+            df = pd.DataFrame(all_school_data)
+            df.to_csv(csv_filename, index=False, encoding='utf-8')
+            print(f"✅ Penulisan Berhasil! Data disimpan di: {csv_filename}")
+        except Exception as e:
+            print(f"❌ ERROR saat menulis ke CSV menggunakan Pandas: {e}")
+    else:
+        print("TIDAK ADA DATA sekolah yang berhasil di-scrape.")
 
 
 if __name__ == '__main__':
