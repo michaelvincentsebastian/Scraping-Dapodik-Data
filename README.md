@@ -11,12 +11,12 @@ Wilayah target:
 ---
 
 ## 📑 Daftar Isi
-- [Struktur Proyek](#struktur-proyek)
-- [Instalasi](#instalasi)
-- [Penggunaan](#penggunaan)
-- [Penjelasan Program](#penjelasan-program)
-- [Hasil Data CSV](#hasil-data-csv)
-- [Troubleshooting & Solusi](#troubleshooting--solusi)
+- [Struktur Proyek](#-struktur-proyek)
+- [Instalasi](#%EF%B8%8F-instalasi)
+- [Penggunaan](#%EF%B8%8F-penggunaan)
+- [Penjelasan Program](#-penjelasan-program)
+- [Hasil Data CSV](#-hasil-data-csv)
+- [Troubleshooting & Solusi](#-troubleshooting--solusi)
 
 ---
 
