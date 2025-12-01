@@ -24,7 +24,7 @@ CSV_FILE = os.path.join('result', 'data_Palembang.csv') # <-- NAMA FILE
 # Konstanta baru untuk kontrol kecepatan dan retry
 MAX_WORKERS = 5            # Maksimal 5 thread berjalan bersamaan
 RETRY_DELAY = 10           # Jeda awal detik sebelum mencoba ulang request yang gagal
-SCHOOL_DETAIL_DELAY = 3    # Digunakan untuk mengontrol kecepatan peluncuran thread di main()
+SCHOOL_DETAIL_DELAY = 1    # Digunakan untuk mengontrol kecepatan peluncuran thread di main()
 
 
 # --- FUNGSI DENGAN MEKANISME RETRY TANPA BATAS (LOOP WHILE TRUE) ---
