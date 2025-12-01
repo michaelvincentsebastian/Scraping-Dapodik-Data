@@ -1,0 +1,3 @@
+Palembang	: Sumatera Selatan	-> [Kota Palembang]
+Makassar	: Sulawesi Selatan		-> [Kota Makassar]
+Balikpapak	: Kalimantan Timur	-> [Kota Balikpapan]
