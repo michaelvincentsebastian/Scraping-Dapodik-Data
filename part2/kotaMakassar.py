@@ -1,6 +1,6 @@
 import os
 import time
-import concurrent.futures # <-- MODUL BARU
+import concurrent.futures 
 
 # ==========================================================
 # IMPORT FUNGSI DARI MODUL KHUSUS (dapodik_utils.py)
@@ -21,53 +21,76 @@ TARGET_CITY_NAME = "KOTA MAKASSAR"
 TARGET_PROVINCE_NAME = "SULAWESI SELATAN"
 CSV_FILE = os.path.join('result', 'data_Makassar.csv')
 
-# Konstanta untuk batas thread/request
-MAX_WORKERS = 5 # Maksimal 5 thread berjalan bersamaan
-SCHOOL_DETAIL_DELAY = 3 # Jeda per sekolah tetap dipertahankan
+# Konstanta baru
+MAX_WORKERS = 5            # Maksimal 5 thread berjalan bersamaan
+# MAX_RETRIES DIBUANG
+RETRY_DELAY = 10           # Jeda awal detik sebelum mencoba ulang request yang gagal
+# SCHOOL_DETAIL_DELAY (3 detik) digunakan sebagai jeda antar thread di main()
+SCHOOL_DETAIL_DELAY = 3
 
-# --- FUNGSI BARU UNTUK MEMPROSES SEKOLAH SECARA INDIVIDUAL ---
+
+# --- FUNGSI DENGAN MEKANISME RETRY TANPA BATAS (LOOP WHILE TRUE) ---
 def process_school(sekolah, processed_ids, province_name, city_name, kecamatan_name):
-    """Memproses detail satu sekolah dan menyimpannya ke CSV."""
+    """
+    Memproses detail satu sekolah dan menyimpannya ke CSV.
+    Menerapkan mekanisme retry (coba ulang) tanpa batas hingga berhasil.
+    """
     
     sekolah_id_enkrip = sekolah['sekolah_id_enkrip'].strip()
     
-    # Pengecekan ID yang sudah diproses tetap di sini untuk menghindari request yang tidak perlu
+    # 1. Pengecekan ID yang sudah diproses (Mekanisme Resume)
     if sekolah_id_enkrip in processed_ids:
-        print(f"      Sekolah (SKIP, sudah di CSV): {sekolah['nama']}")
+        print(f"      Sekolah (SKIP, sudah di CSV): {sekolah['nama']}")
         return True 
     
-    print(f"      Sekolah: {sekolah['nama']}")
-    try:
-        school_url = f"https://dapo.dikdasmen.go.id/sekolah/{sekolah_id_enkrip}" 
+    school_url = f"https://dapo.dikdasmen.go.id/sekolah/{sekolah_id_enkrip}"
+    
+    # 2. Loop Retry Tanpa Batas (while True)
+    retry_count = 0
+    
+    while True:
+        retry_count += 1
+        print(f"      Sekolah: {sekolah['nama']} (Percobaan ke-{retry_count})")
         
-        # Jeda PENTING untuk menghindari Rate Limiting dari server Dapodik
-        time.sleep(SCHOOL_DETAIL_DELAY) 
-        
-        school_data = parse_html(school_url) 
-
-        write_successful = append_to_csv(
-            CSV_FILE, sekolah_id_enkrip, school_data, sekolah['nama'],
-            province_name, city_name, kecamatan_name
-        )
-        
-        if write_successful:
-            print(f"      ✅ SUCCESS: {sekolah['nama']} berhasil disimpan.")
-            return sekolah_id_enkrip # Mengembalikan ID jika sukses
-        else:
-            print(f"      ⚠️ GAGAL DISIMPAN ke CSV (Cek error di atas).")
-            return None
+        try:
+            school_data = parse_html(school_url) # <-- Request detail sekolah
             
-    except Exception as e:
-        print(f"      ❌ Error processing school {sekolah['nama']}: {e}")
-        return None
+            # Jika berhasil mendapatkan data, lanjut menyimpan
+            write_successful = append_to_csv(
+                CSV_FILE, sekolah_id_enkrip, school_data, sekolah['nama'],
+                province_name, city_name, kecamatan_name
+            )
+            
+            if write_successful:
+                print(f"      ✅ SUCCESS: {sekolah['nama']} berhasil disimpan.")
+                return sekolah_id_enkrip # KELUAR DARI LOOP jika sukses
+            else:
+                # Gagal menyimpan ke CSV (masalah internal), coba lagi setelah jeda
+                print(f"      ⚠️ GAGAL DISIMPAN ke CSV. Mencoba lagi.")
+                time.sleep(5) 
+                # Lanjut ke awal loop (percobaan berikutnya)
+                
+        except Exception as e:
+            # Jika terjadi error (Timeout, 404, 429)
+            print(f"      ❌ Error processing school {sekolah['nama']}: {e}")
+            
+            # --- MEKANISME EXPONENTIAL BACKOFF (Jeda bertambah) ---
+            # Jeda dihitung: RETRY_DELAY * (2 ^ (retry_count - 1))
+            delay_time = RETRY_DELAY * (2 ** (retry_count - 1))
+            if delay_time > 120: delay_time = 120 # Batasi jeda maksimal 120 detik (2 menit)
 
+            print(f"      ⏳ Menunggu {delay_time:.1f} detik sebelum mencoba ulang...")
+            time.sleep(delay_time)
+            # Lanjut ke awal loop (percobaan berikutnya)
+                
+    # Fungsi ini tidak akan pernah mencapai titik ini selama loop True berjalan
 
+# --- FUNGSI MAIN() DAN LOGIKA SISANYA SAMA ---
 def main():
     print(f"=========================================")
-    print(f"|  START SCRAPING: {TARGET_CITY_NAME}  |")
+    print(f"|  START SCRAPING: {TARGET_CITY_NAME}  |")
     print(f"=========================================")
     
-    # Pastikan direktori result ada
     os.makedirs('result', exist_ok=True) 
     
     create_csv_header(CSV_FILE)
@@ -81,7 +104,6 @@ def main():
     provinsi_list = request_api(backoff=3) 
 
     for province in provinsi_list:
-        # --- Normalisasi Nama Provinsi ---
         nama_prov_api = province['nama'].upper().strip()
         
         if nama_prov_api.startswith("PROV. "):
@@ -90,15 +112,14 @@ def main():
             nama_prov_upper = nama_prov_api[5:].strip()
         else:
             nama_prov_upper = nama_prov_api
-        
+            
         if nama_prov_upper != TARGET_PROVINCE_NAME:
-            continue # Langsung skip provinsi lain
+            continue
 
         print(f"\nPROVINSI MATCH: {province['nama']} (TARGET PROV) ✨")
         level_wilayah_prov = province['id_level_wilayah']
         kode_wilayah_prov = province['kode_wilayah'].strip()
 
-        # Ambil semua kota/kab di provinsi ini
         response_kota = request_api(
             level_wilayah=level_wilayah_prov,
             kode_wilayah=kode_wilayah_prov,
@@ -114,15 +135,13 @@ def main():
             nama_kota_upper = nama_kota.upper().strip()
 
             if nama_kota_upper != TARGET_CITY_NAME:
-                print(f"  >>> Skip {nama_kota}")
+                print(f"  >>> Skip {nama_kota}")
                 continue
             
-            # --- MULAI PROSES KOTA TARGET ---
-            print(f"\n  Kota/Kab MATCH: {nama_kota} (TARGET KOTA) 🎯")
+            print(f"\n  Kota/Kab MATCH: {nama_kota} (TARGET KOTA) 🎯")
             level_wilayah_kota = kota['id_level_wilayah']
             kode_wilayah_kota = kota['kode_wilayah'].strip()
 
-            # Ambil kecamatan di kota tsb
             response_kecamatan = request_api(
                 level_wilayah=level_wilayah_kota,
                 kode_wilayah=kode_wilayah_kota,
@@ -131,16 +150,16 @@ def main():
             )
 
             # ---------------------------------------------------------------------
-            # PERULANGAN 3: KECAMATAN (Memproses sekolah di dalam executor)
+            # PERULANGAN 3: KECAMATAN
             # ---------------------------------------------------------------------
             for kecamatan in response_kecamatan:
-                print(f"    Kecamatan: {kecamatan['nama']}")
+                print(f"    Kecamatan: {kecamatan['nama']}")
                 level_wilayah_kec = kecamatan['id_level_wilayah']
                 kode_wilayah_kec = kecamatan['kode_wilayah'].strip()
 
-                # Mengambil daftar sekolah (request API ini tetap harus sinkron/sequential)
-                print("    [DELAY] Jeda 8 detik sebelum memproses sekolah...")
-                time.sleep(8)
+                print("    [DELAY] Jeda 8 detik sebelum memproses sekolah...")
+                time.sleep(8) 
+                
                 response_sekolah = request_api(
                     level_wilayah=level_wilayah_kec,
                     kode_wilayah=kode_wilayah_kec,
@@ -149,7 +168,7 @@ def main():
                 )
 
                 if not response_sekolah:
-                    print("    ❌ GAGAL mengambil daftar sekolah. Melanjutkan.")
+                    print("    ❌ GAGAL mengambil daftar sekolah. Melanjutkan.")
                     time.sleep(5)
                     continue
 
@@ -163,21 +182,25 @@ def main():
                         sekolah_to_process.append(sekolah)
 
                 if not sekolah_to_process:
-                    print("    Tidak ada sekolah yang memenuhi kriteria di kecamatan ini.")
+                    print("    Tidak ada sekolah yang memenuhi kriteria di kecamatan ini.")
                     continue
 
-                print(f"    Memulai {len(sekolah_to_process)} sekolah menggunakan ThreadPoolExecutor (max {MAX_WORKERS} threads)...")
+                print(f"    Memulai {len(sekolah_to_process)} sekolah menggunakan ThreadPoolExecutor (max {MAX_WORKERS} threads)...")
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                     futures = []
                     for sekolah in sekolah_to_process:
                         future = executor.submit(process_school, sekolah, processed_ids, province['nama'], kota['nama'], kecamatan['nama'])
                         futures.append(future)
+                        
+                        # Mengontrol kecepatan peluncuran thread
+                        time.sleep(SCHOOL_DETAIL_DELAY / MAX_WORKERS)
+                        
 
                     # Kumpulkan hasil dan perbarui processed_ids
                     for future in concurrent.futures.as_completed(futures):
                         result_id = future.result()
-                        if result_id and result_id is not True: # Cek jika bukan True (yang berarti skip)
+                        if result_id and result_id is not True: 
                             processed_ids.add(result_id)
                 # --- AKHIR MULTITHREADING ---
 
